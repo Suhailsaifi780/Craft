@@ -22,9 +22,11 @@ public class DeleteProfileServiceImpl implements DeleteProfileService{
         ResponseEntityBody responseEntityBody = new ResponseEntityBody();
 
         try {
-            customersRepository.deleteById(customerId);
+            if (customerId != null) {
+                customersRepository.deleteById(customerId);
 
-            responseEntityBody = ResponseEntityUtil.createResponseEntityBody("Successfully Deleted Profile for CustomerId : " + customerId.toString(), HttpStatus.OK, "/craft/delete/profile", null, null);
+                responseEntityBody = ResponseEntityUtil.createResponseEntityBody("Successfully Deleted Profile for CustomerId : " + customerId.toString(), HttpStatus.OK, "/craft/delete/profile", null, null);
+            }
         } catch (Exception e) {
             log.error("For customerId : {}, exception occurred while deleting customer profile and error message is : {}", customerId, e.getMessage());
             responseEntityBody = ResponseEntityUtil.createResponseEntityBody(e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR, "/craft/create/profile", null, null);

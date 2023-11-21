@@ -9,17 +9,23 @@ import com.example.craft.repositories.CustomersRepository;
 import com.example.craft.repositories.SubscribedProductsRepository;
 import com.example.craft.utils.CommonUtil;
 import com.example.craft.utils.ResponseEntityUtil;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.retry.annotation.Retry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.web.client.RestTemplateBuilder;
 import org.springframework.context.annotation.Bean;
-import org.springframework.http.HttpMethod;
-import org.springframework.http.HttpStatus;
+import org.springframework.http.*;
+import org.springframework.http.converter.HttpMessageConverter;
+import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -37,7 +43,8 @@ public class UpdateProfileServiceImpl implements UpdateProfileService {
 
     @Bean
     private RestTemplate restTemplate() {
-        return new RestTemplate();
+        RestTemplate restTemplate = new RestTemplate();
+        return restTemplate;
     }
 
     @Override
@@ -47,21 +54,29 @@ public class UpdateProfileServiceImpl implements UpdateProfileService {
 
         try {
             log.info("For customerId : {}, updating profile data is : {}", updateProfileRequest.getCustomer_id(), updateProfileRequest);
-            List<String> productValidationUrls = subscribedProductsRepository.findAllProductsSubscribedByUser(updateProfileRequest.getCustomer_id());
 
-            log.info("For customerId : {}, all subscribed products are : {}", updateProfileRequest.getCustomer_id(), productValidationUrls.size());
+            Optional<Customers> customersOptional = customersRepository.findById(updateProfileRequest.getCustomer_id());
 
-            String validationMessage = validateAcrossAllSubscribedProducts(productValidationUrls, updateProfileRequest);
-            if (validationMessage.equalsIgnoreCase(GeneralConstants.VALIDATED)) {
-                log.info("For customerId : {}, proceeding to update profile.", updateProfileRequest.getCustomer_id());
+            if (customersOptional.isPresent()) {
+                Customers customers = customersOptional.get();
 
-                responseEntityBody = updateProfileAfterValidation(updateProfileRequest);
+                List<String> productValidationUrls = subscribedProductsRepository.findAllProductsSubscribedByUser(updateProfileRequest.getCustomer_id());
 
+                log.info("For customerId : {}, all subscribed products are : {}", updateProfileRequest.getCustomer_id(), productValidationUrls.size());
+
+                String validationMessage = validateAcrossAllSubscribedProducts(productValidationUrls, updateProfileRequest);
+                if (validationMessage.equalsIgnoreCase(GeneralConstants.VALIDATED)) {
+                    log.info("For customerId : {}, proceeding to update profile.", updateProfileRequest.getCustomer_id());
+
+                    responseEntityBody = updateProfileAfterValidation(updateProfileRequest, customers);
+
+                } else {
+                    log.info("For customerId : {}, can't update as it is not validated by other products and message is : {}", updateProfileRequest.getCustomer_id(), validationMessage);
+                    responseEntityBody = ResponseEntityUtil.createResponseEntityBody(validationMessage, HttpStatus.CONFLICT, "/craft/update/profile", null, null);
+                }
             } else {
-                log.info("For customerId : {}, can't update as it is not validated by other products and message is : {}", updateProfileRequest.getCustomer_id(), validationMessage);
-                responseEntityBody = ResponseEntityUtil.createResponseEntityBody(validationMessage, HttpStatus.CONFLICT, "/craft/update/profile", null, null);
+                responseEntityBody = ResponseEntityUtil.createResponseEntityBody("Customer not present with this id", HttpStatus.OK, "/craft/update/profile", null, null);
             }
-
         } catch (Exception e) {
             log.error("For customerId : {}, exception occurred while updating customer profile and error message is : {}", updateProfileRequest.getCustomer_id(), e.getMessage());
             responseEntityBody = ResponseEntityUtil.createResponseEntityBody(e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR, "/craft/update/profile", null, null);
@@ -71,24 +86,19 @@ public class UpdateProfileServiceImpl implements UpdateProfileService {
         return responseEntityBody;
     }
 
-    private ResponseEntityBody updateProfileAfterValidation(UpdateProfileRequest updateProfileRequest) {
+    private ResponseEntityBody updateProfileAfterValidation(UpdateProfileRequest updateProfileRequest, Customers customer) {
         log.info("Inside updateProfileAfterValidation for customerId : {}", updateProfileRequest.getCustomer_id());
         ResponseEntityBody responseEntityBody = new ResponseEntityBody();
 
         try {
-            Optional<Customers> customersOptional = customersRepository.findById(updateProfileRequest.getCustomer_id());
-
-            if (customersOptional.isPresent()) {
-                Customers customer = customersOptional.get();
-
                 if (setUpdatedDataToCustomer(customer, updateProfileRequest)) {
                     log.info("For customerId : {}, saving updated data", updateProfileRequest.getCustomer_id());
                     customersRepository.save(customer);
-                }
 
-            } else {
-                responseEntityBody = ResponseEntityUtil.createResponseEntityBody("Customer not present with this id", HttpStatus.OK, "/craft/update/profile", null, null);
-            }
+                    responseEntityBody = ResponseEntityUtil.createResponseEntityBody("Successfully updated profile", HttpStatus.OK, "/craft/update/profile", null, null);
+                } else {
+                    responseEntityBody = ResponseEntityUtil.createResponseEntityBody("No updated data is present.", HttpStatus.OK, "/craft/update/profile", null, null);
+                }
 
         } catch (Exception e) {
             log.error("For customerId : {}, exception occurred while updating profile and error message is : {}", updateProfileRequest.getCustomer_id(), e.getMessage());
@@ -166,21 +176,33 @@ public class UpdateProfileServiceImpl implements UpdateProfileService {
 
     }
 
-    @Retry(name = GeneralConstants.VALIDATE_DATA_ACROSS_ALL_PRODUCTS, fallbackMethod = "handleValidationHttpCalls")
+    @CircuitBreaker(name = GeneralConstants.VALIDATE_DATA_ACROSS_ALL_PRODUCTS, fallbackMethod = "handleValidationHttpCalls")
     private String validateAcrossAllSubscribedProducts(List<String> productValidationUrls, UpdateProfileRequest updateProfileRequest) {
+        log.info("Inside validateAcrossAllSubscribedProducts for customerId : {}, with subscribed products urls : {}", updateProfileRequest.getCustomer_id(), productValidationUrls);
+
         AtomicReference<String> validationMessage = new AtomicReference<>("");
 
         if (productValidationUrls != null && !productValidationUrls.isEmpty()) {
             List<CompletableFuture<Void>> futures = productValidationUrls.stream()
-                    .map(url -> CompletableFuture.supplyAsync(() -> restTemplate().exchange(url, HttpMethod.GET, null, ValidationResponse.class))
+                    .map(url -> CompletableFuture.supplyAsync(() -> restTemplate().exchange(url, HttpMethod.GET, new HttpEntity<>(updateProfileRequest), String.class))
                             .thenAccept(x -> {
-                                ValidationResponse validationResponse = x.getBody();
-                                if (validationResponse != null
-                                        && validationResponse.getStatus() != null
-                                        && validationResponse.getStatus().equalsIgnoreCase(GeneralConstants.VALIDATED)) {
-                                    validationMessage.set(GeneralConstants.VALIDATED);
-                                } else {
-                                    validationMessage.set("");
+
+                                log.info("Response from url : {}, is : {}", url, x);
+                                try {
+                                    ObjectMapper objectMapper = new ObjectMapper();
+
+                                    ValidationResponse validationResponse = objectMapper.readValue(x.getBody(), ValidationResponse.class);
+                                    log.info("Response body after parsing from url : {}, is : {}", url, validationResponse);
+
+                                    if (validationResponse != null
+                                            && validationResponse.getMessage() != null
+                                            && validationResponse.getMessage().equalsIgnoreCase(GeneralConstants.VALIDATED)) {
+                                        validationMessage.set(GeneralConstants.VALIDATED);
+                                    } else {
+                                        validationMessage.set(GeneralConstants.NOT_VALIDATED);
+                                    }
+                                } catch (JsonProcessingException e) {
+                                    throw new RuntimeException(e);
                                 }
                             })).toList();
 
@@ -192,7 +214,9 @@ public class UpdateProfileServiceImpl implements UpdateProfileService {
         return validationMessage.get();
     }
 
-    private void handleValidationHttpCalls(Exception e) {
+    public String handleValidationHttpCallsFallBack(Exception e) {
+        log.info("Inside handleValidationHttpCallsFallBack for error : {}", e.getMessage());
 
+        return GeneralConstants.NOT_VALIDATED;
     }
 }

@@ -89,4 +89,21 @@ public class Customers {
         this.email = createProfileRequest.getEmail();
         this.website = createProfileRequest.getWebsite();
     }
+
+    public Customers(Long i, String legalName, String companyName, String addressLine1, String addressLine2, String city, String state, int zip, String country, String legalAddress, String panNumber, String einNumber, String email, String website) {
+        this.id = i;
+        this.legalName = legalName;
+        this.companyName = companyName;
+        this.addressLine1 = addressLine1;
+        this.addressLine2 = addressLine2;
+        this.city = city;
+        this.state = state;
+        this.zip = zip;
+        this.country = country;
+        this.legalAddress = legalAddress;
+        this.panNumber = panNumber;
+        this.einNumber = einNumber;
+        this.email = email;
+        this.website = website;
+    }
 }
